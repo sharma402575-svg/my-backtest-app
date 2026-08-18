@@ -1,24 +1,23 @@
-# 📊 Indian Market Pro-Quant Backtesting Application
+# 📈 Indian Market Backtesting App
 
-An interactive, high-performance backtesting engine built with **Streamlit**, **Pandas**, and **Plotly** designed specifically for quantitative analysis in the Indian Stock Markets (NSE/BSE). Run, analyze, and save multi-strategy configurations dynamically.
+A user-friendly backtesting application for the Indian stock market (NSE/BSE).
+Test multiple strategies across indices and stocks with various indicators and timeframes.
 
-## 🚀 Key Features
+## ✨ Features
 
-* **Multi-Sector Capabilities:** Supports NSE & BSE stocks, index benchmarks (Nifty 50, Nifty Bank), and customized user-defined tickers.
-* **Pre-engineered Strategies:** 
-  * Moving Average (EMA/SMA) Crossovers
-  * RSI (Relative Strength Index) Mean-Reversion
-  * MACD (Moving Average Convergence Divergence) Momentum Crosses
-* **Multi-Timeframe Analysis:** Supports Daily (`1d`), Hourly (`1h`), and Intraday (`15m`, `5m`) intervals via `yfinance`.
-* **Institutional Metrics Engine:** Calculates CAGR, Sharpe Ratio, Max Drawdown (Risk profile), Trade Counts, and overall Win Rates.
-* **Local Database Storage:** Features an integrated SQLite engine that records your chosen strategy's results so you can review previous setups anytime.
-* **Interactive Visualization:** Powered by Plotly, supporting zooming, panning, tracking buy/sell triggers, and portfolio value curves.
+- 🇮🇳 **Indian Market Focus** — Indices (NIFTY, BANK NIFTY, SENSEX) & sector stocks
+- 📊 **Multiple Strategies** — SMA/EMA Crossover, RSI, MACD, Bollinger Bands, Combos
+- ⏱️ **Multiple Timeframes** — 5min, 15min, 1H, Daily, Weekly, Monthly
+- 🏭 **Sector-wise Testing** — IT, Banking, Auto, Pharma, FMCG, Energy, Metal
+- 📈 **Rich Visuals** — Candlestick charts, buy/sell signals, equity curves
+- ⭐ **Save Favorites** — Store the strategies & results you like
+- 💰 **Risk Management** — Stop loss, take profit, position sizing
+- 📋 **Full Metrics** — Returns, Win Rate, Sharpe, Drawdown, Profit Factor
 
-## 📦 How to Install and Run Locally
+## 🚀 Installation
 
-Ensure you have **Python 3.8+** installed on your workstation.
-
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/YOUR-USERNAME/indian-market-backtester.git
-   cd indian-market-backtester
+```bash
+git clone https://github.com/yourusername/indian-backtester.git
+cd indian-backtester
+pip install -r requirements.txt
+streamlit run app.py
