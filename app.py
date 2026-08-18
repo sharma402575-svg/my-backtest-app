@@ -3,7 +3,6 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-import pandas_ta as ta
 import json
 import os
 
@@ -11,14 +10,17 @@ st.set_page_config(page_title="Custom Strategy Backtester", layout="wide")
 
 SAVED_FILE = "strategies.json"
 
-# Load saved strategies from local storage
+# Load saved strategies from disk
 def load_saved_strategies():
     if os.path.exists(SAVED_FILE):
-        with open(SAVED_FILE, "r") as f:
-            return json.load(f)
+        try:
+            with open(SAVED_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {}
     return {}
 
-# Save strategies to local storage
+# Save strategy to disk
 def save_strategy_to_file(name, config):
     strategies = load_saved_strategies()
     strategies[name] = config
@@ -49,13 +51,13 @@ st.sidebar.header("2. Dedicated Strategy Condition Engine")
 strat_name = st.sidebar.text_input("Strategy Name", value="Nifty EMA-RSI Strategy")
 
 st.sidebar.markdown("**Technical Indicators Period:**")
-ema_period = st.sidebar.number_input("EMA Period", value=20)
-rsi_period = st.sidebar.number_input("RSI Period", value=14)
+ema_period = st.sidebar.number_input("EMA Period", min_value=2, max_value=200, value=20)
+rsi_period = st.sidebar.number_input("RSI Period", min_value=2, max_value=100, value=14)
 
 st.sidebar.markdown("**Entry Rule (Pandas Logic):**")
 entry_rule = st.sidebar.text_area("BUY Condition", value="(Close > EMA) and (RSI < 70)")
 
-# --- SIDEBAR: STRATEGY PERSISTENCE ---
+# --- SIDEBAR: SAVED STRATEGIES ---
 st.sidebar.header("3. Saved Strategies")
 if st.sidebar.button("💾 Save Strategy"):
     config = {
@@ -67,7 +69,7 @@ if st.sidebar.button("💾 Save Strategy"):
         "capital": capital
     }
     save_strategy_to_file(strat_name, config)
-    st.sidebar.success(f"Saved '{strat_name}' to disk!")
+    st.sidebar.success(f"Saved '{strat_name}' successfully!")
 
 saved_strats = load_saved_strategies()
 if saved_strats:
@@ -76,28 +78,28 @@ if saved_strats:
         loaded = saved_strats[selected_strat]
         st.info(f"Loaded: {selected_strat} | Ticker: {loaded['ticker']} | Rule: {loaded['entry_rule']}")
 
-# --- FETCH DATA AND PROCESS ---
+# --- FETCH DATA ---
 @st.cache_data
 def fetch_data(symbol, start, end):
-    df = yf.download(symbol, start=start, end=end)
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    return df
+    data = yf.download(symbol, start=start, end=end)
+    if isinstance(data.columns, pd.MultiIndex):
+        data.columns = data.columns.get_level_values(0)
+    return data
 
 df = fetch_data(ticker, start_date, end_date)
 
 if not df.empty and len(df) > 50:
-    # Indicator calculations
+    # 1. Native EMA Calculation
     df['EMA'] = df['Close'].ewm(span=ema_period, adjust=False).mean()
     
-    # RSI calculation
+    # 2. Native RSI Calculation
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=int(rsi_period)).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=int(rsi_period)).mean()
     rs = gain / loss
     df['RSI'] = 100 - (100 / (1 + rs))
 
-    # Evaluate entry condition safely
+    # 3. Dynamic Rule Evaluation
     try:
         df['Signal'] = df.eval(entry_rule).astype(int)
     except Exception as e:
@@ -106,12 +108,12 @@ if not df.empty and len(df) > 50:
 
     df['Position'] = df['Signal'].shift(1).fillna(0)
 
-    # Calculate returns
+    # 4. Returns & Equity Curve
     df['Market_Return'] = df['Close'].pct_change()
     df['Strategy_Return'] = df['Market_Return'] * df['Position']
     df['Equity_Curve'] = capital * (1 + df['Strategy_Return'].fillna(0)).cumprod()
 
-    # --- CHARTS SECTION ---
+    # --- CHARTS ---
     st.subheader(f"Price & Indicator Analysis: {ticker}")
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name="Close / LTP", line=dict(color='gray')))
@@ -123,7 +125,7 @@ if not df.empty and len(df) > 50:
     fig_eq.add_trace(go.Scatter(x=df.index, y=df['Equity_Curve'], name="Equity Curve", line=dict(color='green')))
     st.plotly_chart(fig_eq, use_container_width=True)
 
-    # --- TRADE LOGS TABLE ---
+    # --- TRADE LOG TABLE ---
     st.subheader("📋 Trade Log Table")
     trades = []
     in_trade = False
@@ -132,7 +134,7 @@ if not df.empty and len(df) > 50:
     qty = 0
 
     for i in range(1, len(df)):
-        # Buy trigger
+        # Buy Trigger
         if df['Position'].iloc[i] == 1 and not in_trade:
             in_trade = True
             entry_date = df.index[i].strftime('%Y-%m-%d')
@@ -140,7 +142,7 @@ if not df.empty and len(df) > 50:
             deployed = capital
             qty = deployed / entry_price
         
-        # Exit trigger
+        # Exit Trigger
         elif df['Position'].iloc[i] == 0 and in_trade:
             in_trade = False
             exit_date = df.index[i].strftime('%Y-%m-%d')
@@ -165,4 +167,4 @@ if not df.empty and len(df) > 50:
         st.info("No trades were executed with the current strategy conditions.")
 
 else:
-    st.error(f"Unable to load data for symbol '{ticker}'. Make sure the ticker name is correct.")
+    st.error(f"Unable to load data for symbol '{ticker}'. Please check the symbol.")
