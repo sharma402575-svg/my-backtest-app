@@ -1,221 +1,342 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
 import numpy as np
+import yfinance as yf
 import plotly.graph_objects as go
-import json
-import os
+from plotly.subplots import make_subplots
+import sqlite3
+from datetime import datetime, timedelta
 
-st.set_page_config(page_title="Versatile Multi-Market Lab", layout="wide")
+# --- DATABASE SETUP ---
+DB_FILE = "backtest_results.db"
 
-SAVED_FILE = "strategies.json"
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS saved_strategies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            strategy_name TEXT,
+            ticker TEXT,
+            timeframe TEXT,
+            total_return REAL,
+            sharpe_ratio REAL,
+            max_drawdown REAL,
+            win_rate REAL,
+            total_trades INTEGER,
+            parameters TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
-def load_saved_strategies():
-    if os.path.exists(SAVED_FILE):
-        try:
-            with open(SAVED_FILE, "r") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-    return {}
+def save_strategy_to_db(strat_data):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO saved_strategies 
+        (timestamp, strategy_name, ticker, timeframe, total_return, sharpe_ratio, max_drawdown, win_rate, total_trades, parameters)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        strat_data['strategy_name'],
+        strat_data['ticker'],
+        strat_data['timeframe'],
+        strat_data['total_return'],
+        strat_data['sharpe_ratio'],
+        strat_data['max_drawdown'],
+        strat_data['win_rate'],
+        strat_data['total_trades'],
+        str(strat_data['parameters'])
+    ))
+    conn.commit()
+    conn.close()
 
-def save_strategy_to_file(name, config):
-    strategies = load_saved_strategies()
-    strategies[name] = config
-    with open(SAVED_FILE, "w") as f:
-        json.dump(strategies, f, indent=4)
+def get_saved_strategies():
+    conn = sqlite3.connect(DB_FILE)
+    df = pd.read_sql_query("SELECT * FROM saved_strategies ORDER BY id DESC", conn)
+    conn.close()
+    return df
 
-st.title("⚡ Versatile Multi-Market Strategy Lab")
+def delete_saved_strategy(id):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM saved_strategies WHERE id = ?", (id,))
+    conn.commit()
+    conn.close()
 
-# --- SIDEBAR: ASSET SELECTION ---
-st.sidebar.header("1. Asset Configuration")
-market_type = st.sidebar.radio("Select Asset Type", ["Nifty 50 Index (^NSEI)", "Custom Indian Stock (NSE)", "US Stock / Global", "Futures"])
+# --- INDIAN MARKET SECTOR PRESETS ---
+INDIAN_SECTORS = {
+    "Indices": ["^NSEI", "^NSEBANK", "NIFTY_MIDCAP_50.NS"],
+    "IT Sector": ["TCS.NS", "INFY.NS", "WIPRO.NS", "HCLTECH.NS", "TECHM.NS"],
+    "Banking & Finance": ["HDFCBANK.NS", "ICICIBANK.NS", "SBIN.NS", "KOTAKBANK.NS", "AXISBANK.NS"],
+    "Auto Sector": ["TATAMOTORS.NS", "M&M.NS", "MARUTI.NS", "BHARATFORG.NS", "EICHERMOT.NS"],
+    "Energy & Resources": ["RELIANCE.NS", "ONGC.NS", "POWERGRID.NS", "NTPC.NS", "COALINDIA.NS"],
+    "FMCG": ["HINDUNILVR.NS", "ITC.NS", "NESTLEIND.NS", "BRITANNIA.NS", "TATACONSUM.NS"],
+    "Custom Ticker": []
+}
 
-if market_type == "Nifty 50 Index (^NSEI)":
-    ticker = "^NSEI"
-elif market_type == "Custom Indian Stock (NSE)":
-    ticker = st.sidebar.text_input("NSE Ticker (e.g. RELIANCE.NS, TATAMOTORS.NS)", value="RELIANCE.NS")
-elif market_type == "US Stock / Global":
-    ticker = st.sidebar.text_input("Global Ticker (e.g. AAPL, TSLA)", value="AAPL")
-else:
-    ticker = st.sidebar.text_input("Futures Ticker (e.g. GC=F, NQ=F)", value="GC=F")
+# --- STRATEGIES ---
+def apply_ma_crossover(df, fast_period, slow_period):
+    df['Fast_MA'] = df['Close'].rolling(window=fast_period).mean()
+    df['Slow_MA'] = df['Close'].rolling(window=slow_period).mean()
+    df['Signal'] = 0
+    df.iloc[fast_period:, df.columns.get_loc('Signal')] = np.where(
+        df['Fast_MA'].iloc[fast_period:] > df['Slow_MA'].iloc[fast_period:], 1, -1
+    )
+    df['Position'] = df['Signal'].shift(1)
+    return df
 
-start_date = st.sidebar.date_input("Start Date", pd.to_datetime("2021-01-01"))
-end_date = st.sidebar.date_input("End Date", pd.to_datetime("2026-01-01"))
-capital = st.sidebar.number_input("Starting Capital (₹/$)", value=100000, step=10000)
-
-# --- SIDEBAR: VERSATILE INDICATOR BUILDER ---
-st.sidebar.header("2. Indicator Configurator")
-sma_fast_p = st.sidebar.number_input("Fast SMA Period", value=10)
-sma_slow_p = st.sidebar.number_input("Slow SMA Period", value=50)
-ema_p = st.sidebar.number_input("EMA Period", value=20)
-rsi_p = st.sidebar.number_input("RSI Period", value=14)
-
-st.sidebar.header("3. Dynamic Rules (Any Formula)")
-entry_rule = st.sidebar.text_area("BUY Entry Logic", value="(SMA_Fast > SMA_Slow) and (RSI < 70)")
-exit_rule = st.sidebar.text_area("SELL / Exit Logic", value="(SMA_Fast < SMA_Slow) or (RSI > 80)")
-
-# --- SIDEBAR: STRATEGY PERSISTENCE ---
-st.sidebar.header("4. Strategy Storage")
-strat_name = st.sidebar.text_input("Strategy Name", value="Multi-Indicator Setup")
-if st.sidebar.button("💾 Save Strategy"):
-    config = {
-        "market_type": market_type, "ticker": ticker,
-        "sma_fast": int(sma_fast_p), "sma_slow": int(sma_slow_p),
-        "ema": int(ema_p), "rsi": int(rsi_p),
-        "entry_rule": entry_rule, "exit_rule": exit_rule, "capital": capital
-    }
-    save_strategy_to_file(strat_name, config)
-    st.sidebar.success(f"Saved '{strat_name}' successfully!")
-
-saved_strats = load_saved_strategies()
-if saved_strats:
-    selected_strat = st.sidebar.selectbox("Load Saved Setup", list(saved_strats.keys()))
-    if st.sidebar.button("📂 Load Selected Setup"):
-        loaded = saved_strats[selected_strat]
-        st.info(f"Loaded: {selected_strat} | Rule: {loaded['entry_rule']}")
-
-# --- DATA FETCHING & MULTIINDEX FIX ---
-@st.cache_data
-def fetch_data(symbol, start, end):
-    data = yf.download(symbol, start=start, end=end)
-    if isinstance(data.columns, pd.MultiIndex):
-        try:
-            data.columns = data.columns.droplevel(1)
-        except Exception:
-            data.columns = data.columns.get_level_values(0)
-    return data
-
-df = fetch_data(ticker, start_date, end_date)
-
-if not df.empty and len(df) > 50:
-    # --- VERSATILE TECHNICAL CALCULATIONS ---
-    df['SMA_Fast'] = df['Close'].rolling(window=int(sma_fast_p)).mean()
-    df['SMA_Slow'] = df['Close'].rolling(window=int(sma_slow_p)).mean()
-    df['EMA'] = df['Close'].ewm(span=int(ema_p), adjust=False).mean()
-    
-    # RSI calculation
+def apply_rsi_strategy(df, period, oversold, overbought):
     delta = df['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=int(rsi_p)).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=int(rsi_p)).mean()
-    rs = gain / loss
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / (loss + 1e-10)
     df['RSI'] = 100 - (100 / (1 + rs))
-
-    # MACD Calculation
-    ema12 = df['Close'].ewm(span=12, adjust=False).mean()
-    ema26 = df['Close'].ewm(span=26, adjust=False).mean()
-    df['MACD'] = ema12 - ema26
-    df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-
-    # --- DYNAMIC EVALUATION ENGINE ---
-    try:
-        df['Buy_Cond'] = df.eval(entry_rule).astype(int)
-        df['Exit_Cond'] = df.eval(exit_rule).astype(int)
-    except Exception as e:
-        st.error(f"Logic Evaluation Error: {e}")
-        df['Buy_Cond'] = 0
-        df['Exit_Cond'] = 0
-
-    # Simulation loop for custom position rules
-    positions = []
-    current_pos = 0
-    for i in range(len(df)):
-        if current_pos == 0:
-            if df['Buy_Cond'].iloc[i] == 1:
-                current_pos = 1
-        elif current_pos == 1:
-            if df['Exit_Cond'].iloc[i] == 1:
-                current_pos = 0
-        positions.append(current_pos)
-
-    df['Position'] = pd.Series(positions, index=df.index).shift(1).fillna(0)
-    df['Market_Return'] = df['Close'].pct_change()
-    df['Strategy_Return'] = df['Market_Return'] * df['Position']
-    df['Equity_Curve'] = capital * (1 + df['Strategy_Return'].fillna(0)).cumprod()
-
-    # --- TRADE LOG & METRICS GENERATION ---
-    trades = []
-    in_trade = False
-    entry_date = None
-    entry_price = 0
-    cum_pnl = 0
-
-    for i in range(1, len(df)):
-        if df['Position'].iloc[i] == 1 and not in_trade:
-            in_trade = True
-            entry_date = df.index[i]
-            entry_price = df['Close'].iloc[i]
-            deployed = capital
-            qty = deployed / entry_price
-        
-        elif df['Position'].iloc[i] == 0 and in_trade:
-            in_trade = False
-            exit_date = df.index[i]
-            exit_price = df['Close'].iloc[i]
-            net_pnl = (exit_price - entry_price) * qty
-            pnl_pct = ((exit_price - entry_price) / entry_price) * 100
-            cum_pnl += net_pnl
-            duration = (exit_date - entry_date).days
-
-            trades.append({
-                "Entry Date": entry_date.strftime('%Y-%m-%d'),
-                "Entry LTP": round(entry_price, 2),
-                "Exit Date": exit_date.strftime('%Y-%m-%d'),
-                "Exit LTP": round(exit_price, 2),
-                "Duration (Days)": duration,
-                "Amount Deployed": round(deployed, 2),
-                "Net P&L (₹/$)": round(net_pnl, 2),
-                "P&L (%)": round(pnl_pct, 2),
-                "Cum. P&L": round(cum_pnl, 2)
-            })
-
-    # --- TOP PERFORMANCE DASHBOARD ---
-    st.subheader("📊 Performance Summary Dashboard")
-    if trades:
-        trade_df = pd.DataFrame(trades)
-        total_trades = len(trade_df)
-        winning_trades = len(trade_df[trade_df['Net P&L (₹/$)'] > 0])
-        win_rate = (winning_trades / total_trades) * 100
-        
-        total_strat_return = ((df['Equity_Curve'].iloc[-1] - capital) / capital) * 100
-        
-        # Drawdown calculation
-        cummax = df['Equity_Curve'].cummax()
-        drawdown = ((df['Equity_Curve'] - cummax) / cummax) * 100
-        max_drawdown = drawdown.min()
-
-        gross_profit = trade_df[trade_df['Net P&L (₹/$)'] > 0]['Net P&L (₹/$)'].sum()
-        gross_loss = abs(trade_df[trade_df['Net P&L (₹/$)'] < 0]['Net P&L (₹/$)'].sum())
-        profit_factor = (gross_profit / gross_loss) if gross_loss != 0 else np.nan
-
-        m1, m2, m3, m4, m5 = st.columns(5)
-        m1.metric("Strategy Return", f"{total_strat_return:.2f}%")
-        m2.metric("Win Rate", f"{win_rate:.1f}%")
-        m3.metric("Max Drawdown", f"{max_drawdown:.2f}%")
-        m4.metric("Profit Factor", f"{profit_factor:.2f}" if not np.isnan(profit_factor) else "N/A")
-        m5.metric("Total Trades", f"{total_trades}")
-    else:
-        st.warning("No trades executed based on current Entry/Exit conditions.")
-
-    # --- CHARTS SECTION ---
-    st.subheader(f"Price & Indicator Analysis: {ticker}")
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name="Close Price / LTP", line=dict(color='black')))
-    fig.add_trace(go.Scatter(x=df.index, y=df['SMA_Fast'], name=f"Fast SMA ({sma_fast_p})"))
-    fig.add_trace(go.Scatter(x=df.index, y=df['SMA_Slow'], name=f"Slow SMA ({sma_slow_p})"))
-    fig.add_trace(go.Scatter(x=df.index, y=df['EMA'], name=f"EMA ({ema_p})"))
-    st.plotly_chart(fig, use_container_width=True)
-
-    st.subheader("Portfolio Equity Curve Growth")
-    fig_eq = go.Figure()
-    fig_eq.add_trace(go.Scatter(x=df.index, y=df['Equity_Curve'], name="Strategy Equity", line=dict(color='green')))
-    st.plotly_chart(fig_eq, use_container_width=True)
-
-    # --- TRADE LOG TABLE ---
-    st.subheader("📋 Trade Log Table")
-    if trades:
-        st.dataframe(trade_df, use_container_width=True)
-
-else:
-    st.error(f"Unable to load data for symbol '{ticker}'. Make sure the ticker name is valid.")
     
+    df['Signal'] = 0
+    # Buy when oversold, Sell when overbought
+    df.loc[df['RSI'] < oversold, 'Signal'] = 1
+    df.loc[df['RSI'] > overbought, 'Signal'] = -1
+    df['Signal'] = df['Signal'].replace(0, np.nan).ffill().fillna(0)
+    df['Position'] = df['Signal'].shift(1)
+    return df
+
+def apply_macd_strategy(df, fast, slow, signal):
+    fast_ema = df['Close'].ewm(span=fast, adjust=False).mean()
+    slow_ema = df['Close'].ewm(span=slow, adjust=False).mean()
+    df['MACD'] = fast_ema - slow_ema
+    df['MACD_Signal'] = df['MACD'].ewm(span=signal, adjust=False).mean()
+    
+    df['Signal'] = np.where(df['MACD'] > df['MACD_Signal'], 1, -1)
+    df['Position'] = df['Signal'].shift(1)
+    return df
+
+# --- PERFORMANCE ENGINE ---
+def evaluate_performance(df, initial_capital=100000):
+    df = df.dropna().copy()
+    if len(df) == 0:
+        return None, None
+        
+    df['Market_Returns'] = df['Close'].pct_change()
+    df['Strategy_Returns'] = df['Market_Returns'] * df['Position']
+    df['Cum_Strategy_Returns'] = (1 + df['Strategy_Returns'].fillna(0)).cumprod()
+    df['Cum_Market_Returns'] = (1 + df['Market_Returns'].fillna(0)).cumprod()
+    
+    df['Portfolio_Value'] = df['Cum_Strategy_Returns'] * initial_capital
+
+    # Calculate Drawdown
+    df['Peak'] = df['Portfolio_Value'].cummax()
+    df['Drawdown'] = (df['Portfolio_Value'] - df['Peak']) / df['Peak']
+    max_dd = df['Drawdown'].min()
+
+    # Calculate Trade Metrics
+    df['Trade_Signal'] = df['Position'].diff()
+    trades = df[df['Trade_Signal'] != 0]
+    total_trades = len(trades)
+    
+    # Calculate Win Rate
+    trade_returns = df['Strategy_Returns'][df['Trade_Signal'] != 0]
+    winning_trades = len(trade_returns[trade_returns > 0])
+    win_rate = (winning_trades / total_trades) if total_trades > 0 else 0
+
+    # Sharpe Ratio (Assuming 5% Risk Free Rate in India)
+    rf_daily = 0.05 / 252
+    excess_returns = df['Strategy_Returns'] - rf_daily
+    sharpe = np.sqrt(252) * (excess_returns.mean() / (excess_returns.std() + 1e-10))
+
+    total_return = (df['Portfolio_Value'].iloc[-1] - initial_capital) / initial_capital
+
+    metrics = {
+        "Total Return (%)": round(total_return * 100, 2),
+        "Market Return (%)": round((df['Cum_Market_Returns'].iloc[-1] - 1) * 100, 2),
+        "Sharpe Ratio": round(sharpe, 2),
+        "Max Drawdown (%)": round(max_dd * 100, 2),
+        "Total Trades": total_trades,
+        "Win Rate (%)": round(win_rate * 100, 2),
+        "Final Value (₹)": f"₹{df['Portfolio_Value'].iloc[-1]:,.2f}"
+    }
+    
+    return metrics, df
+
+# --- STREAMLIT UI ---
+st.set_page_config(page_title="Pro-Quant Backtester (Indian Market)", layout="wide")
+init_db()
+
+st.title("📊 Pro-Quant Backtester (Indian Market)")
+st.caption("Perform enterprise-grade historical backtesting on NSE/BSE Index & Stocks.")
+
+# Sidebar Configuration
+st.sidebar.header("🔧 Configuration")
+
+# 1. Sector & Ticker Selection
+sector = st.sidebar.selectbox("Choose Sector / Universe", list(INDIAN_SECTORS.keys()))
+if sector == "Custom Ticker":
+    ticker_input = st.sidebar.text_input("Enter NSE/BSE Ticker (e.g., RELIANCE.NS, INFIBEAM.BO)", "RELIANCE.NS")
+    ticker = ticker_input.upper()
+else:
+    ticker = st.sidebar.selectbox("Select Stock", INDIAN_SECTORS[sector])
+
+# 2. Timeframe & Date
+timeframe = st.sidebar.selectbox("Select Timeframe", ["1d", "1h", "15m", "5m"])
+start_date = st.sidebar.date_input("Start Date", datetime.now() - timedelta(days=365))
+end_date = st.sidebar.date_input("End Date", datetime.now())
+
+# 3. Strategy Setup
+st.sidebar.header("🎯 Strategy & Parameters")
+strategy_choice = st.sidebar.selectbox("Choose Strategy", ["Moving Average Crossover", "RSI Mean Reversion", "MACD Crossover"])
+
+params = {}
+if strategy_choice == "Moving Average Crossover":
+    params['fast_period'] = st.sidebar.slider("Fast MA Period", 5, 50, 9)
+    params['slow_period'] = st.sidebar.slider("Slow MA Period", 20, 200, 21)
+elif strategy_choice == "RSI Mean Reversion":
+    params['period'] = st.sidebar.slider("RSI Period", 5, 30, 14)
+    params['oversold'] = st.sidebar.slider("Oversold Level (Buy)", 10, 40, 30)
+    params['overbought'] = st.sidebar.slider("Overbought Level (Sell)", 60, 90, 70)
+elif strategy_choice == "MACD Crossover":
+    params['fast'] = st.sidebar.slider("Fast EMA", 5, 30, 12)
+    params['slow'] = st.sidebar.slider("Slow EMA", 20, 100, 26)
+    params['signal'] = st.sidebar.slider("Signal Line", 5, 20, 9)
+
+initial_capital = st.sidebar.number_input("Initial Capital (INR)", value=100000, step=10000)
+
+# --- APP TABS ---
+tab1, tab2, tab3 = st.tabs(["🚀 Backtest Engine", "💾 Saved Strategies", "📝 Guide & Docs"])
+
+with tab1:
+    if st.button("▶ Run Backtest", use_container_width=True):
+        with st.spinner(f"Fetching historical data for {ticker}..."):
+            try:
+                # Fetch Data
+                df = yf.download(ticker, start=start_date, end=end_date, interval=timeframe)
+                
+                if df.empty:
+                    st.error("No data found! Ensure you used the correct suffix (e.g., .NS for National Stock Exchange).")
+                else:
+                    # Apply Strategy
+                    if strategy_choice == "Moving Average Crossover":
+                        df = apply_ma_crossover(df, params['fast_period'], params['slow_period'])
+                    elif strategy_choice == "RSI Mean Reversion":
+                        df = apply_rsi_strategy(df, params['period'], params['oversold'], params['overbought'])
+                    elif strategy_choice == "MACD Crossover":
+                        df = apply_macd_strategy(df, params['fast'], params['slow'], params['signal'])
+
+                    # Run Metrics Evaluation
+                    metrics, result_df = evaluate_performance(df, initial_capital)
+
+                    if metrics is None:
+                        st.error("Strategy couldn't generate trades. Try widening the Date range or changing parameters.")
+                    else:
+                        st.success(f"Backtest Completed for {ticker}!")
+                        
+                        # Store current run state for Save option
+                        st.session_state['last_run'] = {
+                            'strategy_name': strategy_choice,
+                            'ticker': ticker,
+                            'timeframe': timeframe,
+                            'total_return': metrics['Total Return (%)'],
+                            'sharpe_ratio': metrics['Sharpe Ratio'],
+                            'max_drawdown': metrics['Max Drawdown (%)'],
+                            'win_rate': metrics['Win Rate (%)'],
+                            'total_trades': metrics['Total Trades'],
+                            'parameters': params
+                        }
+
+                        # Metrics Display Cards
+                        col1, col2, col3, col4, col5 = st.columns(5)
+                        col1.metric("Strategy Return", f"{metrics['Total Return (%)']}%")
+                        col2.metric("Market Return", f"{metrics['Market Return (%)']}%")
+                        col3.metric("Sharpe Ratio", metrics['Sharpe Ratio'])
+                        col4.metric("Max Drawdown", f"{metrics['Max Drawdown (%)']}%")
+                        col5.metric("Win Rate", f"{metrics['Win Rate (%)']}%")
+
+                        col1_val, col2_val = st.columns(2)
+                        col1_val.metric("Total Trades Executed", metrics['Total Trades'])
+                        col2_val.metric("Final Capital (INR)", metrics['Final Value (₹)'])
+
+                        # Save Capability
+                        st.write("---")
+                        if st.button("💖 Save this Strategy & Result", type="primary"):
+                            save_strategy_to_db(st.session_state['last_run'])
+                            st.balloons()
+                            st.success("Successfully saved to database!")
+
+                        # Plotly Interactive Chart
+                        st.subheader("📈 Performance Visualization")
+                        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
+                                           vertical_spacing=0.08, row_heights=[0.7, 0.3])
+
+                        # Main Price & Buy/Sell signals
+                        fig.add_trace(go.Scatter(x=result_df.index, y=result_df['Close'], name='Close Price', line=dict(color='blue')), row=1, col=1)
+                        
+                        # Add Strategy Specific overlays
+                        if strategy_choice == "Moving Average Crossover":
+                            fig.add_trace(go.Scatter(x=result_df.index, y=result_df['Fast_MA'], name='Fast MA', line=dict(color='orange', dash='dash')), row=1, col=1)
+                            fig.add_trace(go.Scatter(x=result_df.index, y=result_df['Slow_MA'], name='Slow MA', line=dict(color='green', dash='dash')), row=1, col=1)
+                        
+                        # Plot Buy/Sell Indicators
+                        buys = result_df[result_df['Trade_Signal'] == 2]  # Change from Short to Long
+                        sells = result_df[result_df['Trade_Signal'] == -2] # Change from Long to Short
+                        
+                        fig.add_trace(go.Scatter(x=buys.index, y=buys['Close'], mode='markers', marker=dict(symbol='triangle-up', size=12, color='green'), name='Buy Signal'), row=1, col=1)
+                        fig.add_trace(go.Scatter(x=sells.index, y=sells['Close'], mode='markers', marker=dict(symbol='triangle-down', size=12, color='red'), name='Sell Signal'), row=1, col=1)
+
+                        # Portfolio growth
+                        fig.add_trace(go.Scatter(x=result_df.index, y=result_df['Portfolio_Value'], name='Portfolio Value', line=dict(color='purple')), row=2, col=1)
+                        
+                        fig.update_layout(height=600, width=1100, title_text=f"Visual Analysis - {ticker}", xaxis_rangeslider_visible=False)
+                        st.plotly_chart(fig, use_container_width=True)
+
+                        # Data Table download option
+                        st.subheader("📊 Detailed Trade Logs")
+                        st.dataframe(result_df[['Close', 'Position', 'Strategy_Returns', 'Portfolio_Value']].tail(100))
+
+            except Exception as e:
+                st.error(f"Error fetching data or parsing strategy: {e}")
+
+with tab2:
+    st.header("Saved Strategies Portfolio")
+    st.write("Browse and manage the setup configurations and performance profiles you have previously liked and saved.")
+    
+    saved_data = get_saved_strategies()
+    if saved_data.empty:
+        st.info("No strategies saved yet. Run a backtest and hit 'Save this Strategy' to log your favorites.")
+    else:
+        for idx, row in saved_data.iterrows():
+            with st.expander(f"✨ {row['strategy_name']} on {row['ticker']} ({row['timestamp']})"):
+                cols = st.columns(5)
+                cols[0].metric("Total Return", f"{row['total_return']}%")
+                cols[1].metric("Sharpe Ratio", row['sharpe_ratio'])
+                cols[2].metric("Max Drawdown", f"{row['max_drawdown']}%")
+                cols[3].metric("Win Rate", f"{row['win_rate']}%")
+                cols[4].metric("Total Trades", int(row['total_trades']))
+                
+                st.write(f"**Parameters Evaluated:** `{row['parameters']}`")
+                st.write(f"**Timeframe Used:** `{row['timeframe']}`")
+                
+                if st.button("🗑️ Delete Saved Run", key=f"del_{row['id']}"):
+                    delete_saved_strategy(row['id'])
+                    st.rerun()
+
+with tab3:
+    st.markdown("""
+    ### 📖 User Guide & Systems Manual
+    Welcome to the **Pro-Quant Backtesting Suite** optimized for the Indian Equity Markets (NSE/BSE).
+    
+    #### How to Search for Assets
+    *   **National Stock Exchange (NSE):** Append `.NS` suffix to stock tickers (e.g., `RELIANCE.NS`, `TCS.NS`, `SBIN.NS`).
+    *   **Bombay Stock Exchange (BSE):** Append `.BO` suffix to stock tickers (e.g., `500325.BO` or `RELIANCE.BO`).
+    *   **Indices:** Use `^NSEI` for Nifty 50 and `^NSEBANK` for Bank Nifty.
+
+    #### Available Strategies
+    1.  **Moving Average Crossover:** Classic trend-following. Long position initiated when Fast MA rises above Slow MA; short position initiated when Fast MA crosses below.
+    2.  **RSI Mean Reversion:** Momentum-based. Buys when security is oversold (default < 30) and reverses position when overbought (default > 70).
+    3.  **MACD Line Crossover:** Measures acceleration. Buys when MACD line crosses above the Signal Line, and sells/shorts on a cross below.
+
+    #### Assumptions
+    *   Slippage & Brokerage commissions are assumed at zero.
+    *   The backtest is executed using Vectorized Pandas architecture for speedy computation.
+    *   Risk-free rate of return is set at `5%` annually (aligned with standard Reserve Bank of India short-term G-Sec rates).
+    """)
