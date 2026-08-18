@@ -1,1 +1,6 @@
-# my-backtest-app
+streamlit
+yfinance
+pandas
+numpy
+plotly
+nsepython
